@@ -10,6 +10,6 @@ chromadb==0.4.22
 sentence-transformers==2.2.2
 pydantic==2.5.3
 python-multipart==0.0.6
-numpy==1.24.3
-spacy==3.6.1
-https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.6.0/en_core_web_sm-3.6.0-py3-none-any.whl
+numpy==2.1.0
+spacy==3.7.2
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
