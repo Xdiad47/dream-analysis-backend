@@ -10,5 +10,5 @@ chromadb==0.4.22
 sentence-transformers==2.2.2
 pydantic==2.5.3
 python-multipart==0.0.6
-numpy==2.1.0
+numpy==1.26.4
 nltk==3.8.1
