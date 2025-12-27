@@ -7,7 +7,7 @@ langchain-community==0.0.38
 langchain-text-splitters==0.0.1
 langchain-core==0.1.52
 chromadb==0.4.22
-sentence-transformers==2.2.2
+sentence-transformers==2.7.0
 pydantic==2.5.3
 python-multipart==0.0.6
 numpy==1.26.4
