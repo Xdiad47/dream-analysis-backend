@@ -7,9 +7,21 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 import chromadb
-import spacy
+import nltk
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
 from datetime import datetime
 import os
+
+# Download NLTK data on first run
+try:
+    nltk.data.find('tokenizers/punkt')
+except LookupError:
+    nltk.download('punkt')
+try:
+    nltk.data.find('corpora/stopwords')
+except LookupError:
+    nltk.download('stopwords')
 
 # Initialize FastAPI
 app = FastAPI(title="Dream Analysis AI API", version="1.0.0")
@@ -29,9 +41,6 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # Initialize AI components (load once at startup)
 print("🚀 Initializing AI components...")
-
-# Load spaCy
-nlp = spacy.load("en_core_web_sm")
 
 # Initialize Groq
 llm = ChatGroq(
@@ -88,11 +97,16 @@ class DreamResponse(BaseModel):
 # ============================================
 
 def extract_entities_and_emotions(dream_text):
-    """Extract entities, emotions, and key themes from dream text"""
-    doc = nlp(dream_text)
+    """Extract entities, emotions, and key themes from dream text using NLTK"""
+    # Tokenize
+    tokens = word_tokenize(dream_text.lower())
+    stop_words = set(stopwords.words('english'))
     
-    entities = [(ent.text, ent.label_) for ent in doc.ents]
-    symbols = [token.text for token in doc if token.pos_ in ['NOUN', 'VERB'] and len(token.text) > 3]
+    # Extract symbols (nouns/verbs longer than 3 chars)
+    symbols = [word for word in tokens if word.isalnum() and len(word) > 3 and word not in stop_words]
+    
+    # Simple entity extraction (capitalized words in original text)
+    entities = [(word, 'ENTITY') for word in dream_text.split() if word[0].isupper() and len(word) > 1]
     
     emotion_keywords = {
         'fear': ['scared', 'afraid', 'terrified', 'panic', 'anxious', 'worried'],
@@ -109,7 +123,7 @@ def extract_entities_and_emotions(dream_text):
             detected_emotions.append(emotion)
     
     return {
-        'entities': entities,
+        'entities': entities[:10],  # Limit to 10
         'symbols': list(set(symbols))[:10],
         'emotions': detected_emotions
     }
@@ -234,4 +248,3 @@ def analyze_dream(request: DreamRequest):
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
 # Run with: uvicorn main:app --host 0.0.0.0 --port 8000
-

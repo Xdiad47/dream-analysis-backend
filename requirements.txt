@@ -11,5 +11,4 @@ sentence-transformers==2.2.2
 pydantic==2.5.3
 python-multipart==0.0.6
 numpy==2.1.0
-spacy==3.7.2
-https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
+nltk==3.8.1
