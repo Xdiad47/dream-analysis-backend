@@ -24,7 +24,8 @@ app.add_middleware(
 )
 
 # Load environment variables
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "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")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
 
 # Initialize AI components (load once at startup)
 print("🚀 Initializing AI components...")
