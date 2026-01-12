@@ -7,11 +7,6 @@ import os
 import json
 import re
 
-from langchain_groq import ChatGroq
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
-
 import nltk
 from nltk.tokenize import word_tokenize
 from nltk.corpus import stopwords
@@ -25,25 +20,22 @@ os.makedirs(NLTK_DATA_DIR, exist_ok=True)
 nltk.data.path.append(NLTK_DATA_DIR)
 
 def ensure_nltk():
-    # tokenizers
     try:
         nltk.data.find("tokenizers/punkt")
     except LookupError:
         nltk.download("punkt", download_dir=NLTK_DATA_DIR)
 
-    # stopwords
     try:
         nltk.data.find("corpora/stopwords")
     except LookupError:
         nltk.download("stopwords", download_dir=NLTK_DATA_DIR)
 
-    # tagger (for POS tagging -> noun-based symbols)
     try:
         nltk.data.find("taggers/averaged_perceptron_tagger")
     except LookupError:
         nltk.download("averaged_perceptron_tagger", download_dir=NLTK_DATA_DIR)
 
-    # Some NLTK builds look for this newer name (safe to try)
+    # optional newer name
     try:
         nltk.data.find("taggers/averaged_perceptron_tagger_eng")
     except LookupError:
@@ -57,7 +49,7 @@ ensure_nltk()
 # ----------------------------
 # FastAPI
 # ----------------------------
-app = FastAPI(title="Dream Analysis AI API", version="2.0.0")
+app = FastAPI(title="Dream Analysis AI API", version="2.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -75,61 +67,69 @@ if not GROQ_API_KEY:
     raise RuntimeError("Missing GROQ_API_KEY environment variable")
 
 # ----------------------------
-# AI components (startup)
+# App state (IMPORTANT for Render)
 # ----------------------------
-print("🚀 Initializing AI components...")
+app.state.llm = None
+app.state.embeddings = None
+app.state.vectorstore = None
+app.state.knowledge_chunks_count = 0
+app.state.ready = False
 
-llm = ChatGroq(
-    groq_api_key=GROQ_API_KEY,
-    model_name="llama-3.1-8b-instant",
-    temperature=0.4,     # lower = more consistent structured output
-    max_tokens=900
-)
+# ----------------------------
+# Startup: load AI AFTER server starts
+# ----------------------------
+@app.on_event("startup")
+def startup_event():
+    """
+    Render timeout fix: do NOT load large models at import time.
+    Load them on startup so Uvicorn can bind the port quickly.
+    """
+    print("🚀 Startup: Initializing AI components...")
 
-embeddings = FastEmbedEmbeddings(
-    model_name="BAAI/bge-small-en-v1.5"
-)
+    from langchain_groq import ChatGroq
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    from langchain_community.vectorstores import Chroma
+    from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
+    from knowledge import psychology_knowledge
 
-from knowledge import psychology_knowledge
+    # LLM
+    app.state.llm = ChatGroq(
+        groq_api_key=GROQ_API_KEY,
+        model_name="llama-3.1-8b-instant",
+        temperature=0.4,
+        max_tokens=900
+    )
 
-text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=350,
-    chunk_overlap=40
-)
+    # Embeddings (this may download HF files; now it's on startup not import)
+    app.state.embeddings = FastEmbedEmbeddings(
+        model_name="BAAI/bge-small-en-v1.5"
+    )
 
-knowledge_chunks: List[str] = []
-for doc in psychology_knowledge:
-    chunks = text_splitter.split_text(doc.strip())
-    knowledge_chunks.extend([c for c in chunks if c.strip()])
+    # Build chunks
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=350, chunk_overlap=40)
+    knowledge_chunks: List[str] = []
+    for doc in psychology_knowledge:
+        chunks = text_splitter.split_text(doc.strip())
+        knowledge_chunks.extend([c for c in chunks if c.strip()])
+    knowledge_chunks = knowledge_chunks[:120]
+    app.state.knowledge_chunks_count = len(knowledge_chunks)
 
-# keep memory + speed friendly
-knowledge_chunks = knowledge_chunks[:120]
+    # Chroma
+    CHROMA_DIR = os.getenv("CHROMA_DIR", "/opt/render/chroma_db")
+    os.makedirs(CHROMA_DIR, exist_ok=True)
 
-CHROMA_DIR = os.getenv("CHROMA_DIR", "/opt/render/chroma_db")
-os.makedirs(CHROMA_DIR, exist_ok=True)
+    # Create/load collection
+    # NOTE: using from_texts is simplest and reliable for persistence
+    app.state.vectorstore = Chroma.from_texts(
+        texts=knowledge_chunks,
+        embedding=app.state.embeddings,
+        collection_name="dream_psychology",
+        persist_directory=CHROMA_DIR
+    )
 
-# Try loading persisted collection first (faster)
-vectorstore = Chroma(
-    collection_name="dream_psychology",
-    persist_directory=CHROMA_DIR,
-    embedding_function=embeddings
-)
-
-# If empty, add your initial knowledge chunks
-try:
-    existing_count = vectorstore._collection.count()  # internal but works with Chroma
-except Exception:
-    existing_count = 0
-
-if existing_count == 0:
-    vectorstore.add_texts(texts=knowledge_chunks)
-    try:
-        vectorstore.persist()
-    except Exception:
-        pass
-
-print("✅ AI components initialized")
-print(f"📚 Knowledge chunks: {len(knowledge_chunks)}")
+    app.state.ready = True
+    print("✅ Startup: AI components initialized")
+    print(f"📚 Knowledge chunks: {app.state.knowledge_chunks_count}")
 
 # ----------------------------
 # Models (UI-friendly)
@@ -146,7 +146,6 @@ class SymbolInsight(BaseModel):
     evidence: str
 
 class DreamResponse(BaseModel):
-    # Existing fields (keep for backward compatibility)
     emotions: List[str]
     symbols: List[str]
     entities: List[Tuple[str, str]]
@@ -154,7 +153,6 @@ class DreamResponse(BaseModel):
     analysisFull: str
     sourcesUsed: int
 
-    # New UI fields
     summary: str
     themes: List[str]
     symbolInsights: List[SymbolInsight]
@@ -178,12 +176,9 @@ def extract_symbols_nouns(dream_text: str) -> List[str]:
             continue
         if len(wl) < 3:
             continue
-
-        # Keep nouns only (NN, NNS, NNP, NNPS)
         if tag.startswith("NN"):
             nouns.append(wl)
 
-    # de-dupe preserve order
     nouns = list(dict.fromkeys(nouns))
     return nouns[:12]
 
@@ -193,13 +188,11 @@ def extract_entities_proper_nouns(dream_text: str) -> List[Tuple[str, str]]:
 
     ents = []
     for w, tag in tagged:
-        # Proper nouns only
         if tag in ("NNP", "NNPS"):
             if w.lower() in ("the", "a", "an", "i"):
                 continue
             ents.append((w, "ENTITY"))
 
-    # de-dupe preserve order
     ents = list(dict.fromkeys(ents))
     return ents[:10]
 
@@ -221,7 +214,6 @@ def detect_emotions(dream_text: str, mood_before_sleep: str) -> List[str]:
         if any(k in dream_lower for k in keywords):
             detected.add(emotion)
 
-    # Use mood as a hint (helps UX)
     mood = (mood_before_sleep or "").strip().lower()
     mood_map = {
         "calm": "calm",
@@ -285,25 +277,21 @@ Return STRICT JSON ONLY (no markdown, no code fences) in exactly this schema:
 
 Rules:
 - Themes: 3–6 items max.
-- SymbolInsights: exactly 3 items if possible (use the dream’s strongest elements).
+- SymbolInsights: exactly 3 items if possible.
 - Evidence: must be a short quote from the dream text (5–12 words).
 - Actions must be practical and small (doable in 5–10 minutes).
-- Do not mention astrology, zodiac, fortune, predictions, or mysticism.
 """.strip()
 
 def extract_json_object(text: str) -> Optional[dict]:
-    # Remove code fences if any
     cleaned = text.strip()
     cleaned = re.sub(r"^```(?:json)?", "", cleaned).strip()
     cleaned = re.sub(r"```$", "", cleaned).strip()
 
-    # Try direct parse
     try:
         return json.loads(cleaned)
     except Exception:
         pass
 
-    # Try to find first {...} block
     match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
     if not match:
         return None
@@ -313,7 +301,7 @@ def extract_json_object(text: str) -> Optional[dict]:
     except Exception:
         return None
 
-def build_markdown_from_ui(ui: dict, dream_text: str, emotions: List[str], sources_used: int) -> str:
+def build_markdown_from_ui(ui: dict, emotions: List[str], sources_used: int) -> str:
     sym_lines = []
     for s in ui.get("symbolInsights", []):
         sym_lines.append(f"- **{s.get('symbol','')}** — {s.get('meaning','')}  \n  _Evidence:_ “{s.get('evidence','')}”")
@@ -347,10 +335,7 @@ def build_markdown_from_ui(ui: dict, dream_text: str, emotions: List[str], sourc
 """.strip()
 
 def fallback_ui(features: Dict[str, Any], dream_text: str) -> dict:
-    # Minimal safe fallback if JSON parsing fails
-    top_syms = features["symbols"][:3]
-    if not top_syms:
-        top_syms = ["dream", "emotion", "context"]
+    top_syms = features["symbols"][:3] or ["dream", "emotion", "context"]
 
     def quote_from_dream():
         words = dream_text.split()
@@ -380,8 +365,7 @@ def fallback_ui(features: Dict[str, Any], dream_text: str) -> dict:
 def analyze_dream_with_rag(dream_text: str, dream_date: str, mood_before_sleep: str) -> Dict[str, Any]:
     features = extract_features(dream_text, mood_before_sleep)
 
-    # Retrieval
-    relevant_docs = vectorstore.similarity_search(dream_text, k=3)
+    relevant_docs = app.state.vectorstore.similarity_search(dream_text, k=3)
     context = "\n\n".join([doc.page_content for doc in relevant_docs])
 
     prompt = build_ui_prompt(
@@ -392,24 +376,20 @@ def analyze_dream_with_rag(dream_text: str, dream_date: str, mood_before_sleep: 
         mood_before_sleep=mood_before_sleep
     )
 
-    response = llm.invoke(prompt)
+    response = app.state.llm.invoke(prompt)
     raw = response.content if hasattr(response, "content") else str(response)
 
-    ui = extract_json_object(raw)
-    if not ui:
-        ui = fallback_ui(features, dream_text)
+    ui = extract_json_object(raw) or fallback_ui(features, dream_text)
 
-    # Validate required keys exist
     ui.setdefault("summary", "A meaningful dream worth reflecting on.")
     ui.setdefault("themes", [])
     ui.setdefault("symbolInsights", [])
     ui.setdefault("questions", [])
     ui.setdefault("actions", [])
 
-    # Backward-compatible fields
     analysis_short = ui["summary"].strip()
     sources_used = len(relevant_docs)
-    analysis_full = build_markdown_from_ui(ui, dream_text, features["emotions"], sources_used)
+    analysis_full = build_markdown_from_ui(ui, features["emotions"], sources_used)
 
     return {
         "ui": ui,
@@ -427,9 +407,9 @@ def root():
     return {
         "status": "online",
         "message": "Dream Analysis AI API",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "endpoints": {
-            "analyze_v1": "/api/v1/dreams/analyze",
+            "analyze": "/api/v1/dreams/analyze",
             "health": "/health"
         }
     }
@@ -438,15 +418,19 @@ def root():
 def health_check():
     return {
         "status": "healthy",
-        "ai_status": "loaded",
-        "vector_db": "ready",
-        "knowledge_chunks": len(knowledge_chunks),
+        "ready": app.state.ready,
+        "ai_status": "loaded" if app.state.ready else "warming_up",
+        "vector_db": "ready" if app.state.ready else "warming_up",
+        "knowledge_chunks": app.state.knowledge_chunks_count,
         "timestamp": datetime.now().isoformat()
     }
 
 @app.post("/api/v1/dreams/analyze", response_model=DreamResponse)
 def analyze_dream(request: DreamRequest):
     try:
+        if not app.state.ready:
+            raise HTTPException(status_code=503, detail="AI is warming up. Try again in a few seconds.")
+
         if not request.dreamText or len(request.dreamText.strip()) < 10:
             raise HTTPException(status_code=400, detail="Dream text too short (minimum 10 characters)")
 
@@ -459,7 +443,6 @@ def analyze_dream(request: DreamRequest):
         ui = result["ui"]
         features = result["features"]
 
-        # Ensure symbolInsights is shaped properly
         symbol_insights = []
         for s in ui.get("symbolInsights", [])[:3]:
             try:
@@ -486,3 +469,4 @@ def analyze_dream(request: DreamRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+
